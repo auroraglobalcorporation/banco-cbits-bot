@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import sqlite3
-import time
 
 # Configuração
 intents = discord.Intents.default()
@@ -17,19 +16,19 @@ BANK_GREEN = 0x00FF00
 BANK_RED = 0xFF0000
 BANK_BLUE = 0x00AAFF
 
-# ============ BANCO DE DADOS ============
-DB_PATH = 'banco_cbits.db'
+# ============ BANCO DE DADOS COMPARTILHADO ============
+DB_PATH = 'cbits_sistema.db'  # ← MESMO banco do Cebu!
 
 def get_connection():
-    """Cria conexão com timeout para evitar lock"""
     return sqlite3.connect(DB_PATH, timeout=30)
 
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Tabela de usuários (COMPARTILHADA)
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS contas (
+        CREATE TABLE IF NOT EXISTS usuarios (
             user_id TEXT PRIMARY KEY,
             username TEXT,
             saldo INTEGER DEFAULT 1000,
@@ -37,6 +36,7 @@ def init_db():
         )
     ''')
     
+    # Tabela de transações
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +48,7 @@ def init_db():
         )
     ''')
     
+    # Tabela de empréstimos
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS emprestimos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,13 +64,13 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("✅ Banco de dados do banco inicializado!")
+    print("✅ Banco de dados compartilhado inicializado!")
 
 def get_saldo(user_id):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT saldo FROM contas WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT saldo FROM usuarios WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else 1000
@@ -80,29 +81,29 @@ def get_divida(user_id):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT divida FROM contas WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT divida FROM usuarios WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else 0
     except:
         return 0
 
-def criar_conta_db(user_id, username):
+def criar_conta(user_id, username):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('INSERT OR IGNORE INTO contas (user_id, username, saldo) VALUES (?, ?, 1000)', (user_id, username))
+        cursor.execute('INSERT OR IGNORE INTO usuarios (user_id, username, saldo) VALUES (?, ?, 1000)', (user_id, username))
         conn.commit()
         conn.close()
         return True
     except:
         return False
 
-def adicionar_saldo_db(user_id, valor, descricao=""):
+def adicionar_saldo(user_id, valor, descricao=""):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE contas SET saldo = saldo + ? WHERE user_id = ?', (valor, user_id))
+        cursor.execute('UPDATE usuarios SET saldo = saldo + ? WHERE user_id = ?', (valor, user_id))
         cursor.execute('INSERT INTO transacoes (user_id, tipo, valor, descricao) VALUES (?, "deposito", ?, ?)', 
                        (user_id, valor, descricao))
         conn.commit()
@@ -111,7 +112,7 @@ def adicionar_saldo_db(user_id, valor, descricao=""):
     except:
         return get_saldo(user_id)
 
-def remover_saldo_db(user_id, valor, descricao=""):
+def remover_saldo(user_id, valor, descricao=""):
     saldo_atual = get_saldo(user_id)
     if saldo_atual < valor:
         return False, saldo_atual
@@ -119,7 +120,7 @@ def remover_saldo_db(user_id, valor, descricao=""):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE contas SET saldo = saldo - ? WHERE user_id = ?', (valor, user_id))
+        cursor.execute('UPDATE usuarios SET saldo = saldo - ? WHERE user_id = ?', (valor, user_id))
         cursor.execute('INSERT INTO transacoes (user_id, tipo, valor, descricao) VALUES (?, "saque", ?, ?)', 
                        (user_id, valor, descricao))
         conn.commit()
@@ -128,7 +129,7 @@ def remover_saldo_db(user_id, valor, descricao=""):
     except:
         return False, saldo_atual
 
-def transferir_db(de_user_id, para_user_id, valor):
+def transferir(de_user_id, para_user_id, valor):
     if get_saldo(de_user_id) < valor:
         return False, "Saldo insuficiente!"
     
@@ -136,8 +137,8 @@ def transferir_db(de_user_id, para_user_id, valor):
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('UPDATE contas SET saldo = saldo - ? WHERE user_id = ?', (valor, de_user_id))
-        cursor.execute('UPDATE contas SET saldo = saldo + ? WHERE user_id = ?', (valor, para_user_id))
+        cursor.execute('UPDATE usuarios SET saldo = saldo - ? WHERE user_id = ?', (valor, de_user_id))
+        cursor.execute('UPDATE usuarios SET saldo = saldo + ? WHERE user_id = ?', (valor, para_user_id))
         
         cursor.execute('INSERT INTO transacoes (user_id, tipo, valor, descricao) VALUES (?, "transferencia_enviada", ?, ?)', 
                        (de_user_id, valor, f"Para {para_user_id}"))
@@ -150,7 +151,7 @@ def transferir_db(de_user_id, para_user_id, valor):
     except:
         return False, "Erro ao transferir"
 
-def solicitar_emprestimo_db(user_id, valor, parcelas):
+def solicitar_emprestimo(user_id, valor, parcelas):
     if valor < 100:
         return False, "Valor mínimo para empréstimo é 100 CBITS!", 0, 0
     if parcelas < 1 or parcelas > 12:
@@ -169,8 +170,8 @@ def solicitar_emprestimo_db(user_id, valor, parcelas):
             VALUES (?, ?, ?, ?)
         ''', (user_id, valor, parcelas, valor_parcela))
         
-        adicionar_saldo_db(user_id, valor, f"Empréstimo de {valor} CBITS")
-        cursor.execute('UPDATE contas SET divida = divida + ? WHERE user_id = ?', (valor_com_juros, user_id))
+        adicionar_saldo(user_id, valor, f"Empréstimo de {valor} CBITS")
+        cursor.execute('UPDATE usuarios SET divida = divida + ? WHERE user_id = ?', (valor_com_juros, user_id))
         
         conn.commit()
         conn.close()
@@ -178,7 +179,7 @@ def solicitar_emprestimo_db(user_id, valor, parcelas):
     except:
         return False, "Erro ao solicitar empréstimo!", 0, 0
 
-def pagar_parcela_db(user_id):
+def pagar_parcela(user_id):
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -197,8 +198,8 @@ def pagar_parcela_db(user_id):
             conn.close()
             return False, f"Saldo insuficiente! Parcela: {valor_parcela} CBITS"
         
-        remover_saldo_db(user_id, valor_parcela, f"Pagamento de parcela {parcelas_pagas + 1}/{parcelas}")
-        cursor.execute('UPDATE contas SET divida = divida - ? WHERE user_id = ?', (valor_parcela, user_id))
+        remover_saldo(user_id, valor_parcela, f"Pagamento de parcela {parcelas_pagas + 1}/{parcelas}")
+        cursor.execute('UPDATE usuarios SET divida = divida - ? WHERE user_id = ?', (valor_parcela, user_id))
         cursor.execute('UPDATE emprestimos SET parcelas_pagas = parcelas_pagas + 1 WHERE id = ?', (emprestimo_id,))
         
         novas_pagas = parcelas_pagas + 1
@@ -215,7 +216,7 @@ def pagar_parcela_db(user_id):
     except:
         return False, "Erro ao pagar parcela!"
 
-def get_extrato_db(user_id, limite=10):
+def get_extrato(user_id, limite=10):
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -229,12 +230,12 @@ def get_extrato_db(user_id, limite=10):
     except:
         return []
 
-def get_ranking_db(limite=10):
+def get_ranking(limite=10):
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT username, saldo FROM contas 
+            SELECT username, saldo FROM usuarios 
             WHERE saldo > 0 ORDER BY saldo DESC LIMIT ?
         ''', (limite,))
         result = cursor.fetchall()
@@ -274,7 +275,7 @@ async def cmd_banco_ajuda(interaction: discord.Interaction):
 
 @bot.tree.command(name='banco_saldo', description='💰 Ver seu saldo')
 async def cmd_banco_saldo(interaction: discord.Interaction):
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
+    criar_conta(str(interaction.user.id), interaction.user.name)
     saldo = get_saldo(str(interaction.user.id))
     divida = get_divida(str(interaction.user.id))
     
@@ -294,9 +295,9 @@ async def cmd_banco_depositar(interaction: discord.Interaction, valor: int):
         await interaction.response.send_message('❌ Valor inválido!', ephemeral=True)
         return
     
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
+    criar_conta(str(interaction.user.id), interaction.user.name)
     saldo_antes = get_saldo(str(interaction.user.id))
-    novo_saldo = adicionar_saldo_db(str(interaction.user.id), valor, "Depósito voluntário")
+    novo_saldo = adicionar_saldo(str(interaction.user.id), valor, "Depósito voluntário")
     
     embed = discord.Embed(
         title='✅ DEPÓSITO REALIZADO!',
@@ -313,10 +314,10 @@ async def cmd_banco_sacar(interaction: discord.Interaction, valor: int):
         await interaction.response.send_message('❌ Valor inválido!', ephemeral=True)
         return
     
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
+    criar_conta(str(interaction.user.id), interaction.user.name)
     saldo_antes = get_saldo(str(interaction.user.id))
     
-    sucesso, novo_saldo = remover_saldo_db(str(interaction.user.id), valor, "Saque normal")
+    sucesso, novo_saldo = remover_saldo(str(interaction.user.id), valor, "Saque normal")
     
     if not sucesso:
         await interaction.response.send_message(f'❌ Saldo insuficiente! Você tem {saldo_antes} CBITS', ephemeral=True)
@@ -341,10 +342,10 @@ async def cmd_banco_transferir(interaction: discord.Interaction, usuario: discor
         await interaction.response.send_message('❌ Não pode transferir para si mesmo!', ephemeral=True)
         return
     
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
-    criar_conta_db(str(usuario.id), usuario.name)
+    criar_conta(str(interaction.user.id), interaction.user.name)
+    criar_conta(str(usuario.id), usuario.name)
     
-    sucesso, mensagem = transferir_db(str(interaction.user.id), str(usuario.id), valor)
+    sucesso, mensagem = transferir(str(interaction.user.id), str(usuario.id), valor)
     
     if not sucesso:
         await interaction.response.send_message(f'❌ {mensagem}', ephemeral=True)
@@ -359,8 +360,8 @@ async def cmd_banco_transferir(interaction: discord.Interaction, usuario: discor
 
 @bot.tree.command(name='banco_extrato', description='📊 Ver últimas transações')
 async def cmd_banco_extrato(interaction: discord.Interaction):
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
-    transacoes = get_extrato_db(str(interaction.user.id), 10)
+    criar_conta(str(interaction.user.id), interaction.user.name)
+    transacoes = get_extrato(str(interaction.user.id), 10)
     
     if not transacoes:
         await interaction.response.send_message('📭 Nenhuma transação.', ephemeral=True)
@@ -385,7 +386,7 @@ async def cmd_banco_extrato(interaction: discord.Interaction):
 
 @bot.tree.command(name='banco_ranking', description='🏆 Ranking dos mais ricos')
 async def cmd_banco_ranking(interaction: discord.Interaction):
-    ranking = get_ranking_db(10)
+    ranking = get_ranking(10)
     
     if not ranking:
         await interaction.response.send_message('📭 Ninguém com saldo positivo.', ephemeral=True)
@@ -402,8 +403,8 @@ async def cmd_banco_ranking(interaction: discord.Interaction):
 @bot.tree.command(name='banco_emprestimo', description='💸 Solicitar empréstimo')
 @app_commands.describe(valor="Valor desejado", parcelas="Número de parcelas (1-12)")
 async def cmd_banco_emprestimo(interaction: discord.Interaction, valor: int, parcelas: int):
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
-    sucesso, mensagem, valor_com_juros, valor_parcela = solicitar_emprestimo_db(str(interaction.user.id), valor, parcelas)
+    criar_conta(str(interaction.user.id), interaction.user.name)
+    sucesso, mensagem, valor_com_juros, valor_parcela = solicitar_emprestimo(str(interaction.user.id), valor, parcelas)
     
     if not sucesso:
         await interaction.response.send_message(f'❌ {mensagem}', ephemeral=True)
@@ -422,8 +423,8 @@ async def cmd_banco_emprestimo(interaction: discord.Interaction, valor: int, par
 
 @bot.tree.command(name='banco_pagar_parcela', description='📅 Pagar parcela do empréstimo')
 async def cmd_banco_pagar_parcela(interaction: discord.Interaction):
-    criar_conta_db(str(interaction.user.id), interaction.user.name)
-    sucesso, mensagem = pagar_parcela_db(str(interaction.user.id))
+    criar_conta(str(interaction.user.id), interaction.user.name)
+    sucesso, mensagem = pagar_parcela(str(interaction.user.id))
     
     if not sucesso:
         await interaction.response.send_message(f'❌ {mensagem}', ephemeral=True)
